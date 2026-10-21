@@ -1,5 +1,16 @@
 # What's new in LightCraft
 
+## 2026-10-21
+
+### Sharpening: Radius and Detail work (new process version 3)
+- Detail ▸ Radius and Detail now change the result, and Sharpening works at pixel scale (issue #757). Before, Radius
+  and Detail were saved but never read, and Sharpening boosted a band about 11 px wide on a 6000 px photo, so it
+  behaved like local contrast with wide halos. Radius (0.5–3 px) is now the width of the sharpening in pixels of the
+  original, shown correctly at any zoom and in exports; Detail goes from sharpening edges only (halos limited) to
+  bringing out all fine texture; Masking limits it to edges.
+- New and reset photos use it. Photos you have already edited keep their sharpening as it was (process versions 1 and
+  2); Photo ▸ Update to Current Process moves them to the new one, one undo step.
+
 ## 2026-10-14
 
 ### Model downloads time out on a name that doesn't resolve

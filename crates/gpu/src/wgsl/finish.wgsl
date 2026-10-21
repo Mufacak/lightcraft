@@ -378,15 +378,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         delta += cl * 0.85 * det * (0.35 + 0.65 * mid);
     }
     let tx = pf(F_TEX) + lt[8];
-    if (tx != 0.0 && pu(F_HAS_TEX) != 0u) {
+    let sp = lt[13] * 0.6 + pf(F_SHARPEN);
+    let px_sharp = pu(F_SHARPEN_PX) != 0u;
+    if ((tx != 0.0 || (!px_sharp && sp != 0.0)) && pu(F_HAS_TEX) != 0u) {
         let det = l_pre - tex[i];
         let tame = 1.0 - 0.6 * sstep(0.4, 1.6, abs(det));
         delta += tx * 1.1 * clamp(det, -1.0, 1.0) * tame;
+        // V1 and V2 (frozen): sharpening boosts the texture band and ignores Radius and Detail
+        if (!px_sharp && sp != 0.0) {
+            let sm = pf(F_SHARPEN_MASK);
+            var mk = 1.0;
+            if (sm > 0.0) {
+                mk = sstep(sm * 0.25, sm * 0.25 + 0.15, abs(det));
+            }
+            delta += sp * 1.3 * clamp(det, -0.8, 0.8) * mk;
+        }
     }
-    // Sharpening (Detail › Sharpening): an unsharp mask at Radius whose shape Detail sets
+    // V3 sharpening (Detail › Sharpening): an unsharp mask at Radius whose shape Detail sets
     // (`lightcraft_pipeline::finish::sharpen_shape`)
-    let sp = lt[13] * 0.6 + pf(F_SHARPEN);
-    if (sp != 0.0 && pu(F_HAS_SHARP) != 0u) {
+    if (px_sharp && sp != 0.0 && pu(F_HAS_SHARP) != 0u) {
         let u = l_pre - sharp[i];
         var f = u;
         if (pu(F_HAS_SHARPF) != 0u) {

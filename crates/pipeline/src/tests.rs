@@ -231,6 +231,34 @@ fn sharpen_detail_zero_limits_the_halo_of_a_hard_edge() {
 }
 
 #[test]
+fn frozen_processes_sharpen_with_the_texture_band_and_v3_at_pixel_scale() {
+    use lightcraft_develop::Process;
+    // a scene big enough that the texture band (0.18 % of the long edge) is several pixels wide
+    let src = lightcraft_scenes::demo_library()[0].render(1200, 800);
+    let info = SourceInfo::default();
+    let req = RenderRequest::fit(1200, 800);
+    let shot = |process: Process, radius: f64, detail: f64| {
+        let mut s = DevelopSettings { process: process.version(), ..DevelopSettings::default() };
+        s.detail.sharpen_amount = 80.0;
+        s.detail.sharpen_masking = 30.0;
+        s.detail.sharpen_radius = radius;
+        s.detail.sharpen_detail = detail;
+        render(&src, &info, &s, &req).image
+    };
+    for frozen in [Process::V1, Process::V2] {
+        let base = shot(frozen, 1.0, 25.0);
+        assert!(max_diff(&base, &shot(frozen, 3.0, 25.0)) == 0, "{frozen:?} ignores Radius");
+        assert!(max_diff(&base, &shot(frozen, 1.0, 100.0)) == 0, "{frozen:?} ignores Detail");
+        assert!(max_diff(&base, &shot(Process::V3, 1.0, 25.0)) > 0, "{frozen:?} does not sharpen like V3");
+    }
+    let v3 = shot(Process::V3, 1.0, 25.0);
+    assert!(max_diff(&v3, &shot(Process::V3, 3.0, 25.0)) > 0, "V3 reads Radius");
+    assert!(max_diff(&v3, &shot(Process::V3, 1.0, 100.0)) > 0, "V3 reads Detail");
+    // V1 and V2 differ only in highlights / shadows, so without those they sharpen alike
+    assert!(max_diff(&shot(Process::V1, 1.0, 25.0), &shot(Process::V2, 1.0, 25.0)) == 0);
+}
+
+#[test]
 fn sharpen_shape_is_odd_bounded_and_gated() {
     use crate::finish::{SHARPEN_GATE_LO, sharpen_shape};
     for detail in [0.0f32, 0.25, 1.0] {

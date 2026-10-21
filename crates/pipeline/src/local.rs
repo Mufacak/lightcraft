@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use lightcraft_raster::{Plane, Rgb32f, par_join};
 
-use crate::finish::SHARPEN_MIN_SIGMA;
+use crate::finish::{SHARPEN_MIN_SIGMA, pixel_sharpening};
 use crate::geometry::Frame;
 use crate::{Prepared, Quality, SourceInfo, for_rows, masks, timed};
 
@@ -274,7 +274,7 @@ pub fn base_detail_radius(px_per_long: f64) -> usize {
 pub fn tone_base_detail(s: &DevelopSettings, px_per_long: f64) -> usize {
     match s.process.process() {
         Process::V1 => 0,
-        Process::V2 => base_detail_radius(px_per_long),
+        Process::V2 | Process::V3 => base_detail_radius(px_per_long),
     }
 }
 
@@ -521,9 +521,16 @@ pub fn plane_sigmas(s: &DevelopSettings, px_per_long: f64, px_scale: f32, q: Qua
     let clarity = (s.effects.clarity != 0.0 || local_any(|a| a.clarity)).then(|| (0.012 * ppl).max(1.0));
     // local Noise and Defringe read the fine detail band too
     let texture_sigma = (0.0018 * ppl).max(0.6);
-    let texture = (s.effects.texture != 0.0 || local_any(|a| a.texture) || local_any(|a| a.noise) || s.masks.iter().any(|m| m.adjust.defringe > 0.0))
-        .then_some(texture_sigma);
+    // (V1 and V2 sharpen with it too, `finish::pixel_sharpening`)
     let sharpening = s.detail.sharpen_amount != 0.0 || local_any(|a| a.sharpness);
+    let pixel = pixel_sharpening(s);
+    let texture = (s.effects.texture != 0.0
+        || (sharpening && !pixel)
+        || local_any(|a| a.texture)
+        || local_any(|a| a.noise)
+        || s.masks.iter().any(|m| m.adjust.defringe > 0.0))
+    .then_some(texture_sigma);
+    let sharpening = sharpening && pixel;
     let sharp_sigma = if px_scale.is_finite() { (sharpen_radius(s) * px_scale).clamp(SHARPEN_MIN_SIGMA, 4096.0) } else { SHARPEN_MIN_SIGMA };
     let sharpen = sharpening.then_some(sharp_sigma);
     let sharpen_fine = (sharpening && s.detail.sharpen_detail > 0.0).then_some((sharp_sigma * 0.5).max(0.3));

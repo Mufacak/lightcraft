@@ -226,6 +226,17 @@ fn cases() -> Vec<(&'static str, Edit)> {
             s.detail.sharpen_amount = 90.0;
             s.detail.sharpen_masking = 60.0;
         }),
+        ("sharpen V2 (texture band; Radius and Detail unread)", |s| {
+            s.process = Process::V2.version();
+            s.detail.sharpen_amount = 90.0;
+            s.detail.sharpen_masking = 30.0;
+            s.detail.sharpen_radius = 3.0;
+            s.detail.sharpen_detail = 100.0;
+        }),
+        ("sharpen V1 (texture band)", |s| {
+            s.process = Process::V1.version();
+            s.detail.sharpen_amount = 60.0;
+        }),
         ("sharpen radius 0.5 / detail 0", |s| {
             s.detail.sharpen_amount = 100.0;
             s.detail.sharpen_radius = 0.5;

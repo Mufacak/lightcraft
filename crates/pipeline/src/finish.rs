@@ -49,6 +49,17 @@ pub fn sharpen_shape(u: f32, f: f32, mask: f32, detail: f32) -> f32 {
     ((edge + detail * (all - edge)) * m).clamp(-1.0, 1.0)
 }
 
+/// Whether `s`'s rendering process sharpens at pixel scale (V3: an unsharp mask at Detail › Radius,
+/// shaped by Detail and Masking) or with the texture band (V1, V2: Radius and Detail are not read).
+/// The frozen processes keep their own sharpening (`docs/process-versions.md`). CPU and GPU both
+/// take it from here.
+pub fn pixel_sharpening(s: &DevelopSettings) -> bool {
+    match s.process.process() {
+        Process::V1 | Process::V2 => false,
+        Process::V3 => true,
+    }
+}
+
 /// Detail › Detail as 0–1. A value that is not a number reads as the default (25).
 pub fn sharpen_detail(s: &DevelopSettings) -> f32 {
     let d = s.detail.sharpen_detail;
@@ -213,6 +224,8 @@ pub struct FinishParams {
     pub sharpen_mask: f32,
     /// Detail, 0–1 (see [`sharpen_shape`]).
     pub sharpen_detail: f32,
+    /// V3 sharpening ([`pixel_sharpening`]); V1 and V2 sharpen with the texture band.
+    pub pixel_sharpening: bool,
     /// Airlight after and before exposure, exposure gain and EV (see [`crate::Prepared`]).
     pub air: f32,
     pub air_pre: f32,
@@ -283,6 +296,7 @@ impl FinishParams {
             sharpen: (s.detail.sharpen_amount / 150.0) as f32,
             sharpen_mask: (s.detail.sharpen_masking / 100.0) as f32,
             sharpen_detail: sharpen_detail(s),
+            pixel_sharpening: pixel_sharpening(s),
             air: air_pre * gain,
             air_pre,
             gain,
@@ -318,8 +332,8 @@ impl FinishParams {
 pub fn base_tone(s: &DevelopSettings, info: &SourceInfo, peak: f32) -> ToneMap {
     let l = &s.light;
     match s.process.process() {
-        // V2 changes the Highlights/Shadows base (`local::tone_base`), not the tone map
-        Process::V1 | Process::V2 => match info.camera_tone.as_ref().filter(|_| info.raw) {
+        // V2 changes the Highlights/Shadows base (`local::tone_base`) and V3 sharpening, not the tone map
+        Process::V1 | Process::V2 | Process::V3 => match info.camera_tone.as_ref().filter(|_| info.raw) {
             Some(curve) => ToneMap::camera_hdr(curve, l.contrast, l.whites, l.blacks, peak),
             None if info.raw => ToneMap::hdr(l.contrast, l.whites, l.blacks, peak),
             None => ToneMap::display_hdr(l.contrast, l.whites, l.blacks, peak),
@@ -418,6 +432,7 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
         sharpen,
         sharpen_mask,
         sharpen_detail,
+        pixel_sharpening,
         air,
         air_pre,
         gain,
@@ -425,8 +440,8 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
         grain,
         ..
     } = fp;
-    let (hl, sh, clar, tex, dehaze, sharpen, sharpen_mask, sharpen_detail, air, air_pre, gain, ev) =
-        (*hl, *sh, *clar, *tex, *dehaze, *sharpen, *sharpen_mask, *sharpen_detail, *air, *air_pre, *gain, *ev);
+    let (hl, sh, clar, tex, dehaze, sharpen, sharpen_mask, sharpen_detail, pixel_sharpening, air, air_pre, gain, ev) =
+        (*hl, *sh, *clar, *tex, *dehaze, *sharpen, *sharpen_mask, *sharpen_detail, *pixel_sharpening, *air, *air_pre, *gain, *ev);
     let terms: Vec<[f32; MASK_TERMS]> = p.masks.iter().map(|m| mask_terms(&m.adjust)).collect();
     let out_to_norm = fp.out_to_norm;
     let long = fp.ow.max(fp.oh);
@@ -540,16 +555,22 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
                 delta += cl * 0.85 * det * (0.35 + 0.65 * mid);
             }
             let tx = tex + l_tex;
-            if tx != 0.0
+            let sp = l_sharp * 0.6 + sharpen;
+            if (tx != 0.0 || (!pixel_sharpening && sp != 0.0))
                 && let Some(b) = &p.texture_blur
             {
                 let det = l_pre - b.data[i];
                 let tame = 1.0 - 0.6 * smooth(0.4, 1.6, det.abs());
                 delta += tx * 1.1 * det.clamp(-1.0, 1.0) * tame;
+                // V1 and V2 (frozen): sharpening boosts the texture band and ignores Radius and Detail
+                if !pixel_sharpening && sp != 0.0 {
+                    let m = if sharpen_mask > 0.0 { smooth(sharpen_mask * 0.25, sharpen_mask * 0.25 + 0.15, det.abs()) } else { 1.0 };
+                    delta += sp * 1.3 * det.clamp(-0.8, 0.8) * m;
+                }
             }
-            // Sharpening (Detail › Sharpening): an unsharp mask at Radius whose shape Detail sets
-            let sp = l_sharp * 0.6 + sharpen;
-            if sp != 0.0
+            // V3 sharpening (Detail › Sharpening): an unsharp mask at Radius whose shape Detail sets
+            if pixel_sharpening
+                && sp != 0.0
                 && let Some(sb) = &p.sharpen_blur
             {
                 let u = l_pre - sb.data[i];
