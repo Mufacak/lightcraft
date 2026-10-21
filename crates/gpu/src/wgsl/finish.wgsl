@@ -1,5 +1,5 @@
 // The per-pixel stage: a straight port of `lightcraft_pipeline::finish` (keep in step with it).
-// Bindings: img (rgb, pre-exposure), log_l, base, clar, tex, dark, masks (NMASK planes, then the
+// Bindings: img (rgb, pre-exposure), log_l, base, clar, tex, sharp, sharpf, dark, masks (NMASK planes, then the
 // blurred chromaticity when HAS_CHROMA), aux
 // (tone LUT | chroma curve | sRGB LUT | curve LUTs | mask terms), out (packed RGBA8).
 
@@ -378,19 +378,30 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         delta += cl * 0.85 * det * (0.35 + 0.65 * mid);
     }
     let tx = pf(F_TEX) + lt[8];
-    let sp = lt[13] * 0.6 + pf(F_SHARPEN);
-    if ((tx != 0.0 || sp != 0.0) && pu(F_HAS_TEX) != 0u) {
+    if (tx != 0.0 && pu(F_HAS_TEX) != 0u) {
         let det = l_pre - tex[i];
         let tame = 1.0 - 0.6 * sstep(0.4, 1.6, abs(det));
         delta += tx * 1.1 * clamp(det, -1.0, 1.0) * tame;
-        if (sp != 0.0) {
-            let sm = pf(F_SHARPEN_MASK);
-            var mk = 1.0;
-            if (sm > 0.0) {
-                mk = sstep(sm * 0.25, sm * 0.25 + 0.15, abs(det));
-            }
-            delta += sp * 1.3 * clamp(det, -0.8, 0.8) * mk;
+    }
+    // Sharpening (Detail › Sharpening): an unsharp mask at Radius whose shape Detail sets
+    // (`lightcraft_pipeline::finish::sharpen_shape`)
+    let sp = lt[13] * 0.6 + pf(F_SHARPEN);
+    if (sp != 0.0 && pu(F_HAS_SHARP) != 0u) {
+        let u = l_pre - sharp[i];
+        var f = u;
+        if (pu(F_HAS_SHARPF) != 0u) {
+            f = l_pre - sharpf[i];
         }
+        let au = abs(u);
+        let edge = u / (1.0 + au / SHARPEN_TAU) * sstep(SHARPEN_GATE_LO, SHARPEN_GATE_HI, au);
+        let full = u + SHARPEN_FINE_GAIN * f;
+        let sm = pf(F_SHARPEN_MASK);
+        var mk = 1.0;
+        if (sm > 0.0) {
+            mk = sstep(sm * 0.25, sm * 0.25 + 0.15, au);
+        }
+        let shape = clamp((edge + pf(F_SHARPEN_DETAIL) * (full - edge)) * mk, -1.0, 1.0);
+        delta += sp * SHARPEN_GAIN * shape;
     }
     // local Noise: smooth (or, negative, boost) small-amplitude detail, keep edges
     if (l_noise != 0.0 && pu(F_HAS_TEX) != 0u) {

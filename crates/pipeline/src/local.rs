@@ -4,11 +4,12 @@
 use lightcraft_color::cct::{temp_tint_to_xy, wb_matrix, xy_to_temp_tint};
 use lightcraft_color::{REC2020, luminance_2020};
 use lightcraft_develop::{DevelopSettings, Process};
-use lightcraft_raster::blur::gaussian;
+use lightcraft_raster::blur::{gaussian, gaussian_exact};
 use std::sync::Arc;
 
 use lightcraft_raster::{Plane, Rgb32f, par_join};
 
+use crate::finish::SHARPEN_MIN_SIGMA;
 use crate::geometry::Frame;
 use crate::{Prepared, Quality, SourceInfo, for_rows, masks, timed};
 
@@ -419,6 +420,9 @@ pub(crate) struct Planes {
     pub base: Option<(BaseKey, Arc<Plane>)>,
     pub clarity: Option<(u32, Arc<Plane>)>,
     pub texture: Option<(u32, Arc<Plane>)>,
+    /// Sharpening's bands at Detail › Radius ([`PlaneSigmas::sharpen`], [`PlaneSigmas::sharpen_fine`]).
+    pub sharpen: Option<(u32, Arc<Plane>)>,
+    pub sharpen_fine: Option<(u32, Arc<Plane>)>,
     /// Dark channel and its airlight.
     pub dark: Option<(u32, Arc<Plane>, f32)>,
     /// Blurred chromaticity (local Moiré / Noise).
@@ -430,7 +434,7 @@ impl Planes {
     /// enough for a draft: the wide blurs (base, clarity, dehaze, chromaticity). Its `key` matches
     /// no image, so only another draft takes them.
     pub fn for_other_nr(self) -> Planes {
-        Planes { key: 0, pre_nr: self.pre_nr, log_l: None, texture: None, ..self }
+        Planes { key: 0, pre_nr: self.pre_nr, log_l: None, texture: None, sharpen: None, sharpen_fine: None, ..self }
     }
 }
 
@@ -480,15 +484,29 @@ pub struct PlaneSigmas {
     pub base_detail: usize,
     /// Clarity band (fast guided filter, [`CLARITY_EPS`]).
     pub clarity: Option<f32>,
-    /// Texture / sharpening band (Gaussian).
+    /// Texture band (Gaussian).
     pub texture: Option<f32>,
+    /// Sharpening's unsharp-mask blur: Detail › Radius in the original's pixels (a true Gaussian,
+    /// [`lightcraft_raster::blur::gaussian_exact`]).
+    pub sharpen: Option<f32>,
+    /// The finer band Detail adds to it, at half that radius (`None` at Detail 0).
+    pub sharpen_fine: Option<f32>,
     /// Dehaze dark channel (Gaussian).
     pub dark: Option<f32>,
     /// Chromaticity blur for local Moiré / colour noise (Gaussian).
     pub chroma: Option<f32>,
 }
 
-pub fn plane_sigmas(s: &DevelopSettings, px_per_long: f64, q: Quality) -> PlaneSigmas {
+/// Detail › Radius in pixels of the original (0.5–3). A value that is not a number reads as 1.
+pub fn sharpen_radius(s: &DevelopSettings) -> f32 {
+    let r = s.detail.sharpen_radius;
+    if r.is_finite() { r.clamp(0.5, 3.0) as f32 } else { 1.0 }
+}
+
+/// Radii (px) of the spatial planes `s` needs for an output of `px_per_long` pixels per unit of the
+/// long edge, `px_scale` output pixels per pixel of the original (not capped at 1: a 200 % view
+/// sharpens at twice the radius).
+pub fn plane_sigmas(s: &DevelopSettings, px_per_long: f64, px_scale: f32, q: Quality) -> PlaneSigmas {
     let ppl = px_per_long as f32;
     let local_any = |f: fn(&lightcraft_develop::LocalAdjustments) -> f64| s.masks.iter().any(|m| f(&m.adjust) != 0.0);
     let tone_active =
@@ -502,17 +520,17 @@ pub fn plane_sigmas(s: &DevelopSettings, px_per_long: f64, q: Quality) -> PlaneS
     });
     let clarity = (s.effects.clarity != 0.0 || local_any(|a| a.clarity)).then(|| (0.012 * ppl).max(1.0));
     // local Noise and Defringe read the fine detail band too
-    let texture = (s.effects.texture != 0.0
-        || s.detail.sharpen_amount != 0.0
-        || local_any(|a| a.texture)
-        || local_any(|a| a.sharpness)
-        || local_any(|a| a.noise)
-        || s.masks.iter().any(|m| m.adjust.defringe > 0.0))
-    .then(|| (0.0018 * ppl).max(0.6));
+    let texture_sigma = (0.0018 * ppl).max(0.6);
+    let texture = (s.effects.texture != 0.0 || local_any(|a| a.texture) || local_any(|a| a.noise) || s.masks.iter().any(|m| m.adjust.defringe > 0.0))
+        .then_some(texture_sigma);
+    let sharpening = s.detail.sharpen_amount != 0.0 || local_any(|a| a.sharpness);
+    let sharp_sigma = if px_scale.is_finite() { (sharpen_radius(s) * px_scale).clamp(SHARPEN_MIN_SIGMA, 4096.0) } else { SHARPEN_MIN_SIGMA };
+    let sharpen = sharpening.then_some(sharp_sigma);
+    let sharpen_fine = (sharpening && s.detail.sharpen_detail > 0.0).then_some((sharp_sigma * 0.5).max(0.3));
     let dark = (s.effects.dehaze != 0.0 || local_any(|a| a.dehaze)).then(|| (0.02 * ppl).max(1.0));
     let chroma = (local_any(|a| a.moire) || s.masks.iter().any(|m| m.adjust.noise > 0.0)).then(|| (CHROMA_SIGMA * ppl).max(1.0));
     let base_detail = if base.is_some() { tone_base_detail(s, px_per_long) } else { 0 };
-    PlaneSigmas { base, base_detail, clarity, texture, dark, chroma }
+    PlaneSigmas { base, base_detail, clarity, texture, sharpen, sharpen_fine, dark, chroma }
 }
 
 /// The spatial planes the per-pixel stage needs for `img` (white-balanced, before exposure),
@@ -524,15 +542,24 @@ pub(crate) fn prepare(
     s: &DevelopSettings,
     frame: &Frame,
     px_per_long: f64,
+    px_scale: f32,
     q: Quality,
     planes: &mut Planes,
     mattes: Option<&masks::Mattes>,
 ) -> Prepared {
     let log_l = planes.log_l.get_or_insert_with(|| Arc::new(timed("log_l", || img.map(log_lum)))).clone();
-    let PlaneSigmas { base: base_sigma, base_detail, clarity: clarity_sigma, texture: texture_sigma, dark: dark_sigma, chroma: chroma_sigma } =
-        plane_sigmas(s, px_per_long, q);
+    let PlaneSigmas {
+        base: base_sigma,
+        base_detail,
+        clarity: clarity_sigma,
+        texture: texture_sigma,
+        sharpen: sharpen_sigma,
+        sharpen_fine: sharpen_fine_sigma,
+        dark: dark_sigma,
+        chroma: chroma_sigma,
+    } = plane_sigmas(s, px_per_long, px_scale, q);
 
-    let Planes { base: sb, clarity: sc, texture: st, dark: sd, chroma: sch, .. } = planes;
+    let Planes { base: sb, clarity: sc, texture: st, sharpen: ss, sharpen_fine: ssf, dark: sd, chroma: sch, .. } = planes;
     let chroma_blur = chroma_sigma.map(|sg| match sch {
         Some((k, c)) if *k == sg.to_bits() => c.clone(),
         _ => {
@@ -566,6 +593,22 @@ pub(crate) fn prepare(
             )
         },
     );
+    let sharpen_blur = sharpen_sigma.map(|sg| match ss {
+        Some((k, c)) if *k == sg.to_bits() => c.clone(),
+        _ => {
+            let c = timed("sharpen", || Arc::new(gaussian_exact(l, sg)));
+            *ss = Some((sg.to_bits(), c.clone()));
+            c
+        }
+    });
+    let sharpen_fine = sharpen_fine_sigma.map(|sg| match ssf {
+        Some((k, c)) if *k == sg.to_bits() => c.clone(),
+        _ => {
+            let c = timed("sharpen_fine", || Arc::new(gaussian_exact(l, sg)));
+            *ssf = Some((sg.to_bits(), c.clone()));
+            c
+        }
+    });
     let base = base.unwrap_or_else(|| log_l.clone());
     let (dark, air) = match dark {
         Some((d, air)) => (Some(d), air),
@@ -573,7 +616,7 @@ pub(crate) fn prepare(
     };
     let ev = s.light.exposure as f32;
     let masks = timed("masks", || masks::evaluate(&s.masks, frame, img.width, img.height, &img, &log_l, ev, mattes));
-    Prepared { img, log_l, base, clarity_blur, texture_blur, dark, chroma_blur, air, masks, px_per_long }
+    Prepared { img, log_l, base, clarity_blur, texture_blur, sharpen_blur, sharpen_fine, dark, chroma_blur, air, masks, px_per_long }
 }
 
 /// The airlight of the whole output frame, estimated on a small render of it (`proxy_w` px wide):

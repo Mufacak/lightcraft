@@ -44,6 +44,8 @@ struct Planes {
     base: Option<(local::BaseKey, Arc<Buf>)>,
     clarity: Option<(u32, Arc<Buf>)>,
     texture: Option<(u32, Arc<Buf>)>,
+    sharpen: Option<(u32, Arc<Buf>)>,
+    sharpen_fine: Option<(u32, Arc<Buf>)>,
     dark: Option<(u32, Arc<Buf>, f32)>,
     chroma: Option<(u32, Arc<Buf>)>,
 }
@@ -105,6 +107,8 @@ impl GpuStages {
             p.base.iter().for_each(|(_, b)| add(b));
             p.clarity.iter().for_each(|(_, b)| add(b));
             p.texture.iter().for_each(|(_, b)| add(b));
+            p.sharpen.iter().for_each(|(_, b)| add(b));
+            p.sharpen_fine.iter().for_each(|(_, b)| add(b));
             p.dark.iter().for_each(|(_, b, _)| add(b));
         }
         if let Some((_, b)) = &*self.source.lock().unwrap_or_else(|e| e.into_inner()) {
@@ -261,6 +265,23 @@ pub(crate) fn gaussian(cx: &mut Cx<'_>, src: &Buf, w: usize, h: usize, nc: usize
     let last = (passes.len() - 1) % 2;
     let [a, b] = std::mem::replace(&mut bufs, [cx.gpu.buffer(0), cx.gpu.buffer(0)]);
     if last == 0 { a } else { b }
+}
+
+/// [`gaussian`] with a true Gaussian kernel for the small sigmas three boxes can't make
+/// (`lightcraft_raster::blur::gaussian_exact`).
+pub(crate) fn gaussian_exact(cx: &mut Cx<'_>, src: &Buf, w: usize, h: usize, nc: usize, sigma: f32) -> Buf {
+    let Some(k) = lightcraft_raster::blur::exact_kernel(sigma) else {
+        return if sigma > lightcraft_raster::blur::EXACT_MAX_SIGMA { gaussian(cx, src, w, h, nc, sigma) } else { cx.copy(src) };
+    };
+    if w == 0 || h == 0 {
+        return cx.copy(src);
+    }
+    let mut p = vec![w as u32, h as u32, nc as u32, (k.len() / 2) as u32];
+    p.extend(k.iter().map(|v| v.to_bits()));
+    let (a, b) = (cx.gpu.buffer(w * h * nc), cx.gpu.buffer(w * h * nc));
+    cx.run("gauss_h", &p, &[Some(src), Some(&a)], groups2(w, h, [64, 4]));
+    cx.run("gauss_v", &p, &[Some(&a), Some(&b)], groups2(w, h, [64, 4]));
+    b
 }
 
 /// Resample taps of `lightcraft_raster::resample::resize`, packed for the `resize_*` kernels.
@@ -675,6 +696,8 @@ pub fn render(
     let present = Present {
         clarity: prep.clarity.is_some(),
         texture: prep.texture.is_some(),
+        sharpen: prep.sharpen.is_some(),
+        sharpen_fine: prep.sharpen_fine.is_some(),
         dark: prep.dark.is_some(),
         chroma: masks.is_some() && prep.chroma.is_some(),
     };
@@ -701,6 +724,8 @@ pub fn render(
                 Some(&prep.base),
                 prep.clarity.as_deref(),
                 prep.texture.as_deref(),
+                prep.sharpen.as_deref(),
+                prep.sharpen_fine.as_deref(),
                 prep.dark.as_deref(),
                 masks.as_ref(),
                 Some(&aux),
@@ -849,6 +874,9 @@ struct Prep {
     base: Arc<Buf>,
     clarity: Option<Arc<Buf>>,
     texture: Option<Arc<Buf>>,
+    /// Sharpening's unsharp-mask blur and the finer band Detail adds ([`local::PlaneSigmas::sharpen`]).
+    sharpen: Option<Arc<Buf>>,
+    sharpen_fine: Option<Arc<Buf>>,
     dark: Option<Arc<Buf>>,
     /// Blurred chromaticity (local Moiré / Noise).
     chroma: Option<Arc<Buf>>,
@@ -859,7 +887,7 @@ struct Prep {
 fn prepare(cx: &mut Cx<'_>, lin: &Buf, plan: &Plan<'_>, req: &RenderRequest, planes: &mut Planes) -> Prep {
     let (w, h) = (plan.w, plan.h);
     let n = w * h;
-    let sig = local::plane_sigmas(&plan.settings, plan.px_per_long, req.quality);
+    let sig = local::plane_sigmas(&plan.settings, plan.px_per_long, plan.px_scale, req.quality);
     let log_l = match &planes.log_l {
         Some(b) => b.clone(),
         None => {
@@ -879,6 +907,8 @@ fn prepare(cx: &mut Cx<'_>, lin: &Buf, plan: &Plan<'_>, req: &RenderRequest, pla
     };
     let clarity = sig.clarity.map(|sg| plane_at(&mut planes.clarity, sg.to_bits(), || guided_fast(cx, &log_l, w, h, sg, local::CLARITY_EPS)));
     let texture = sig.texture.map(|sg| plane_at(&mut planes.texture, sg.to_bits(), || gaussian(cx, &log_l, w, h, 1, sg)));
+    let sharpen = sig.sharpen.map(|sg| plane_at(&mut planes.sharpen, sg.to_bits(), || gaussian_exact(cx, &log_l, w, h, 1, sg)));
+    let sharpen_fine = sig.sharpen_fine.map(|sg| plane_at(&mut planes.sharpen_fine, sg.to_bits(), || gaussian_exact(cx, &log_l, w, h, 1, sg)));
     let (dark, air) = match sig.dark {
         None => (None, 1.0),
         Some(sg) => match &planes.dark {
@@ -906,7 +936,7 @@ fn prepare(cx: &mut Cx<'_>, lin: &Buf, plan: &Plan<'_>, req: &RenderRequest, pla
             gaussian(cx, &ch, w, h, 3, sg)
         })
     });
-    Prep { log_l, base, clarity, texture, dark, chroma, air }
+    Prep { log_l, base, clarity, texture, sharpen, sharpen_fine, dark, chroma, air }
 }
 
 /// Most brush dabs the mask kernel evaluates per pixel (more: the CPU rasterizes the brush).
@@ -1180,6 +1210,33 @@ mod tests {
                     for (i, g) in got.iter().enumerate() {
                         let want = want[i % nc].data[i / nc];
                         assert!((g - want).abs() < 1e-5 * (1.0 + sigma / 10.0), "{w}×{h} nc={nc} sigma={sigma}: word {i} {g} vs {want}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The true-Gaussian blur against `lightcraft_raster::blur::gaussian_exact`: small sigmas the boxes
+    /// can't make, windows wider than the image, and 1, 2 and 3 channels.
+    #[test]
+    fn gaussian_exact_matches_cpu() {
+        use lightcraft_raster::blur;
+        let Some(gpu) = crate::device() else { return };
+        let _scope = crate::ctx::RenderScope::new(gpu);
+        let v = |x: usize, y: usize, c: usize| ((x * 7 + y * 13 + c * 5) % 17) as f32 / 16.0 + if x % 61 < 3 { 2.0 } else { 0.0 };
+        for (w, h) in [(300, 40), (257, 3), (5, 4), (1, 9)] {
+            for sigma in [0.5f32, 0.8, 1.0, 1.7, 3.0, 8.0, 12.0] {
+                let planes: Vec<Plane> = (0..3).map(|c| Plane::from_fn(w, h, |x, y| v(x, y, c))).collect();
+                let want: Vec<Plane> = planes.iter().map(|p| blur::gaussian_exact(p, sigma)).collect();
+                for nc in [1, 2, 3] {
+                    let words: Vec<f32> = (0..w * h).flat_map(|i| (0..nc).map(move |c| (i, c))).map(|(i, c)| planes[c].data[i]).collect();
+                    let mut cx = Cx::new(gpu);
+                    let src = gpu.upload(&words);
+                    let out = gaussian_exact(&mut cx, &src, w, h, nc, sigma);
+                    let got: Vec<f32> = cx.read(&out, w * h * nc);
+                    for (i, g) in got.iter().enumerate() {
+                        let want = want[i % nc].data[i / nc];
+                        assert!((g - want).abs() < 1e-4, "{w}×{h} nc={nc} sigma={sigma}: word {i} {g} vs {want}");
                     }
                 }
             }

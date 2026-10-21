@@ -226,6 +226,22 @@ fn cases() -> Vec<(&'static str, Edit)> {
             s.detail.sharpen_amount = 90.0;
             s.detail.sharpen_masking = 60.0;
         }),
+        ("sharpen radius 0.5 / detail 0", |s| {
+            s.detail.sharpen_amount = 100.0;
+            s.detail.sharpen_radius = 0.5;
+            s.detail.sharpen_detail = 0.0;
+        }),
+        ("sharpen radius 1.7 / detail 60", |s| {
+            s.detail.sharpen_amount = 100.0;
+            s.detail.sharpen_radius = 1.7;
+            s.detail.sharpen_detail = 60.0;
+        }),
+        ("sharpen radius 3 / detail 100 / masking", |s| {
+            s.detail.sharpen_amount = 140.0;
+            s.detail.sharpen_radius = 3.0;
+            s.detail.sharpen_detail = 100.0;
+            s.detail.sharpen_masking = 30.0;
+        }),
         ("white balance", |s| {
             s.wb.mode = WbMode::Custom;
             s.wb.temp = 8200.0;

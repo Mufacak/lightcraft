@@ -126,6 +126,70 @@ pub fn gaussian<T: Pixel>(img: &Image<T>, sigma: f32) -> Image<T> {
     a
 }
 
+/// Below this sigma (px) [`exact_kernel`] makes no blur.
+pub const EXACT_MIN_SIGMA: f32 = 0.1;
+
+/// Above this sigma (px) [`exact_kernel`] leaves the blur to [`gaussian`]: three boxes are within a
+/// percent of a Gaussian by then, and the kernel (3 sigma on each side) would cost a tap per pixel
+/// of it.
+pub const EXACT_MAX_SIGMA: f32 = 8.0;
+
+/// The normalized taps (`2r + 1` of them, `r = ⌈3 sigma⌉`) of a true Gaussian of `sigma`, or `None`
+/// when `sigma` is outside `EXACT_MIN_SIGMA..=EXACT_MAX_SIGMA` (or not a number): [`gaussian`]'s boxes
+/// are whole pixels wide, so it snaps a sigma below ~1.5 px to a few steps (none at all under 0.58),
+/// which a Radius slider must not do.
+pub fn exact_kernel(sigma: f32) -> Option<Vec<f32>> {
+    if sigma.is_nan() || !(EXACT_MIN_SIGMA..=EXACT_MAX_SIGMA).contains(&sigma) {
+        return None;
+    }
+    let r = ((3.0 * sigma).ceil() as usize).max(1);
+    let mut k: Vec<f32> = (0..=2 * r)
+        .map(|i| {
+            let x = i as f32 - r as f32;
+            (-0.5 * x * x / (sigma * sigma)).exp()
+        })
+        .collect();
+    let sum: f32 = k.iter().sum();
+    k.iter_mut().for_each(|v| *v /= sum);
+    Some(k)
+}
+
+/// Blur with a true Gaussian of `sigma` (pixels, clamped edges) for the small sigmas [`gaussian`]'s
+/// boxes can't make ([`exact_kernel`]); other sigmas go to [`gaussian`].
+pub fn gaussian_exact<T: Pixel>(img: &Image<T>, sigma: f32) -> Image<T> {
+    let (w, h) = (img.width, img.height);
+    let Some(k) = exact_kernel(sigma) else {
+        return if sigma > EXACT_MAX_SIGMA { gaussian(img, sigma) } else { img.clone() };
+    };
+    if w == 0 || h == 0 {
+        return img.clone();
+    }
+    let r = k.len() / 2;
+    let (last_x, last_y) = (w - 1, h - 1);
+    let mut a = img.clone();
+    par_rows(&mut a.data, w, |_, row| {
+        let src = row.to_vec();
+        for (x, px) in row.iter_mut().enumerate() {
+            let mut acc = T::zero();
+            for (j, wt) in k.iter().enumerate() {
+                acc = acc.madd(src[(x + j).saturating_sub(r).min(last_x)], *wt);
+            }
+            *px = acc;
+        }
+    });
+    let mut b = Image::<T>::new(w, h);
+    par_rows(&mut b.data, w, |y, out| {
+        out.iter_mut().for_each(|o| *o = T::zero());
+        for (j, wt) in k.iter().enumerate() {
+            let yi = (y + j).saturating_sub(r).min(last_y);
+            for (o, s) in out.iter_mut().zip(&a.data[yi * w..(yi + 1) * w]) {
+                *o = o.madd(*s, *wt);
+            }
+        }
+    });
+    b
+}
+
 #[cfg(test)]
 mod tests {
     /// The box radii of the formula as it was, for the check below.
@@ -207,6 +271,30 @@ mod tests {
             let var: f32 = b.data.iter().enumerate().map(|(i, v)| v * ((i as f32 - 100.0).powi(2))).sum();
             assert!((var.sqrt() - box_sigma(sigma)).abs() < 1e-3, "{sigma}: {} vs {}", var.sqrt(), box_sigma(sigma));
         }
+    }
+
+    #[test]
+    fn exact_gaussian_makes_the_sigma_asked_for_where_the_boxes_cannot() {
+        assert_eq!(exact_kernel(0.05), None);
+        assert_eq!(exact_kernel(f32::NAN), None);
+        assert_eq!(exact_kernel(20.0), None, "wide blurs are the boxes'");
+        for sigma in [0.5f32, 0.6, 0.8, 1.0, 1.3, 2.0, 3.0, 7.0] {
+            let k = exact_kernel(sigma).unwrap();
+            assert!((k.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+            let mut imp = Image::<f32>::new(101, 61);
+            imp.set(50, 30, 1.0);
+            let b = gaussian_exact(&imp, sigma);
+            let row = &b.data[30 * 101..31 * 101];
+            assert!((b.data.iter().sum::<f32>() - 1.0).abs() < 1e-3, "{sigma}: mass kept");
+            // variance along the row (normalized: the row holds only the impulse's centre line) = sigma²
+            let var: f32 = row.iter().enumerate().map(|(i, v)| v * (i as f32 - 50.0).powi(2)).sum::<f32>() / row.iter().sum::<f32>();
+            assert!((var.sqrt() - sigma).abs() < 0.03 * sigma + 0.05, "{sigma}: made {}", var.sqrt());
+        }
+        // the boxes make no blur at 0.5 px at all
+        let mut imp = Image::<f32>::new(21, 1);
+        imp.set(10, 0, 1.0);
+        assert_eq!(gaussian(&imp, 0.5).get(10, 0), 1.0);
+        assert!(gaussian_exact(&imp, 0.5).get(10, 0) < 0.9);
     }
 
     #[test]

@@ -22,6 +22,8 @@ const MODULES: &[Module] = &[
             ("base_p", false, "f32"),
             ("clar", false, "f32"),
             ("tex", false, "f32"),
+            ("sharp", false, "f32"),
+            ("sharpf", false, "f32"),
             ("dark", false, "f32"),
             ("masks", false, "f32"),
             ("aux", false, "f32"),
@@ -32,7 +34,7 @@ const MODULES: &[Module] = &[
     Module {
         src: include_str!("wgsl/blur.wgsl"),
         bindings: &[("src", false, "f32"), ("dst", true, "f32")],
-        entries: &["box_h", "box_v", "median_h", "median_v"],
+        entries: &["box_h", "box_v", "gauss_h", "gauss_v", "median_h", "median_v"],
     },
     Module {
         src: include_str!("wgsl/resize.wgsl"),
@@ -236,7 +238,9 @@ pub struct Gpu {
 
 /// WGSL constants shared by every module (generated from the CPU pipeline's values).
 fn constants() -> String {
-    use lightcraft_pipeline::finish::{GRAIN_HASH, MASK_SUMS, MASK_TERMS, SRGB_LUT_N};
+    use lightcraft_pipeline::finish::{
+        GRAIN_HASH, MASK_SUMS, MASK_TERMS, SHARPEN_FINE_GAIN, SHARPEN_GAIN, SHARPEN_GATE_HI, SHARPEN_GATE_LO, SHARPEN_TAU, SRGB_LUT_N,
+    };
     use lightcraft_pipeline::tone::{CHROMA_N, LUT_MAX_EV, LUT_MIN_EV, LUT_N};
     let mut s = String::new();
     let [to_lms, from_lms, to_lab, from_lab] = lightcraft_color::perceptual::oklab_matrices();
@@ -258,6 +262,9 @@ fn constants() -> String {
     s += &format!("const EYE_WORDS: u32 = {}u;\n", lightcraft_pipeline::redeye::EYE_WORDS);
     use lightcraft_pipeline::masks::{AUTO_TOL_CHROMA, AUTO_TOL_EV};
     s += &format!("const AUTO_TOL_EV: f32 = {AUTO_TOL_EV:?};\nconst AUTO_TOL_CHROMA: f32 = {AUTO_TOL_CHROMA:?};\n");
+    s += &format!(
+        "const SHARPEN_GAIN: f32 = {SHARPEN_GAIN:?};\nconst SHARPEN_GATE_LO: f32 = {SHARPEN_GATE_LO:?};\nconst SHARPEN_GATE_HI: f32 = {SHARPEN_GATE_HI:?};\nconst SHARPEN_TAU: f32 = {SHARPEN_TAU:?};\nconst SHARPEN_FINE_GAIN: f32 = {SHARPEN_FINE_GAIN:?};\n"
+    );
     s += &format!("const SHADOW_TINT_K: f32 = {:?};\n", lightcraft_pipeline::colorops::SHADOW_TINT);
     for (i, h) in GRAIN_HASH.iter().enumerate() {
         s += &format!("const GRAIN_H{i}: u32 = {h}u;\n");

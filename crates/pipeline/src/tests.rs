@@ -165,6 +165,90 @@ fn typical_edits() -> DevelopSettings {
     s
 }
 
+/// Renders `src` (at its own size: one output pixel per source pixel) with `edit` applied to the
+/// default settings.
+fn render_edited(src: &Rgb32f, edit: impl Fn(&mut DevelopSettings)) -> lightcraft_raster::Rgba8 {
+    let mut s = DevelopSettings::default();
+    edit(&mut s);
+    render(src, &SourceInfo::default(), &s, &RenderRequest::fit(src.width, src.height)).image
+}
+
+/// Per column of row `y`: the green channel of `a` minus that of `b`.
+fn row_delta(a: &lightcraft_raster::Rgba8, b: &lightcraft_raster::Rgba8, y: usize) -> Vec<i32> {
+    (0..a.width).map(|x| a.data[y * a.width + x][1] as i32 - b.data[y * a.width + x][1] as i32).collect()
+}
+
+#[test]
+fn sharpen_radius_sets_how_wide_the_edge_is_sharpened() {
+    // a hard step edge: Radius is the width (px) of the band the unsharp mask works on
+    let src = Rgb32f::from_fn(200, 8, |x, _| [if x < 100 { 0.08 } else { 0.48 }; 3]);
+    let flat = render_edited(&src, |_| {});
+    let width = |radius: f64| {
+        let out = render_edited(&src, |s| {
+            s.detail.sharpen_amount = 100.0;
+            s.detail.sharpen_radius = radius;
+            s.detail.sharpen_detail = 100.0;
+        });
+        row_delta(&out, &flat, 4).iter().filter(|d| d.abs() >= 2).count()
+    };
+    let (w05, w1, w3) = (width(0.5), width(1.0), width(3.0));
+    assert!(w05 >= 2, "Radius 0.5 sharpens the edge at all: {w05}");
+    assert!(w05 < w1 && w1 < w3, "the sharpened band widens with Radius: {w05} {w1} {w3}");
+    assert!(w3 >= 2 * w05 + 4, "and a lot: {w05} vs {w3}");
+}
+
+#[test]
+fn sharpen_detail_trades_edge_only_for_fine_texture() {
+    // fine, low-contrast texture (±4 %): edge-only sharpening ignores it, full Detail brings it out
+    let tex = Rgb32f::from_fn(120, 120, |x, y| [0.3 * (1.0 + if (x + y) % 2 == 0 { 0.04 } else { -0.04 }); 3]);
+    let flat = render_edited(&tex, |_| {});
+    let energy = |detail: f64| {
+        let out = render_edited(&tex, |s| {
+            s.detail.sharpen_amount = 100.0;
+            s.detail.sharpen_detail = detail;
+        });
+        (0..120).flat_map(|y| row_delta(&out, &flat, y)).map(|d| d.abs() as i64).sum::<i64>()
+    };
+    let (e0, e25, e100) = (energy(0.0), energy(25.0), energy(100.0));
+    assert!(e0 < e25 && e25 < e100, "Detail brings out texture progressively: {e0} {e25} {e100}");
+    assert!(e100 > 4 * e0.max(1), "markedly: {e0} vs {e100}");
+}
+
+#[test]
+fn sharpen_detail_zero_limits_the_halo_of_a_hard_edge() {
+    let step = Rgb32f::from_fn(200, 8, |x, _| [if x < 100 { 0.05 } else { 0.6 }; 3]);
+    let flat = render_edited(&step, |_| {});
+    let overshoot = |detail: f64| {
+        let out = render_edited(&step, |s| {
+            s.detail.sharpen_amount = 100.0;
+            s.detail.sharpen_detail = detail;
+        });
+        row_delta(&out, &flat, 4).iter().map(|d| d.abs()).max().unwrap_or(0)
+    };
+    let (o0, o100) = (overshoot(0.0), overshoot(100.0));
+    assert!(o0 >= 3, "Detail 0 still sharpens an edge: {o0}");
+    assert!(o100 as f32 >= o0 as f32 * 1.3, "Detail 100 overshoots more: {o0} vs {o100}");
+}
+
+#[test]
+fn sharpen_shape_is_odd_bounded_and_gated() {
+    use crate::finish::{SHARPEN_GATE_LO, sharpen_shape};
+    for detail in [0.0f32, 0.25, 1.0] {
+        for u in [-3.0f32, -0.5, -0.1, 0.0, 0.1, 0.5, 3.0] {
+            let v = sharpen_shape(u, u * 0.7, 0.0, detail);
+            assert!((-1.0..=1.0).contains(&v));
+            assert!((v + sharpen_shape(-u, -u * 0.7, 0.0, detail)).abs() < 1e-6, "odd in u");
+            assert!(v * u >= 0.0, "sharpens, never inverts: u={u} detail={detail} -> {v}");
+        }
+    }
+    assert_eq!(sharpen_shape(SHARPEN_GATE_LO, 0.0, 0.0, 0.0), 0.0, "edge mode ignores weak texture");
+    // Masking: a weak deviation is dropped, a strong one kept
+    assert_eq!(sharpen_shape(0.05, 0.05, 1.0, 1.0), 0.0);
+    assert!(sharpen_shape(0.8, 0.8, 1.0, 1.0) > 0.5);
+    // edge mode soft-clips: 10 EV of `u` gives barely more than 1 EV
+    assert!(sharpen_shape(10.0, 0.0, 0.0, 0.0) < 1.0 * 0.4 + 1e-3 + 0.4);
+}
+
 fn max_diff(a: &lightcraft_raster::Rgba8, b: &lightcraft_raster::Rgba8) -> i32 {
     assert_eq!((a.width, a.height), (b.width, b.height));
     a.data.iter().zip(&b.data).map(|(p, q)| (0..3).map(|c| (p[c] as i32 - q[c] as i32).abs()).max().unwrap_or(0)).max().unwrap_or(0)

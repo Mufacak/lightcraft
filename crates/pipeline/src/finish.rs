@@ -20,6 +20,41 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Sharpening is an unsharp mask on log2 luminance: `u` is the pixel minus its Gaussian blur at
+/// Detail › Radius and `f` the same at half that radius. A full Sharpening amount (150) adds
+/// `SHARPEN_GAIN` times the shape below to the log2 gain of the pixel.
+pub const SHARPEN_GAIN: f32 = 1.5;
+/// Edge mode fades out deviations (log2) from `SHARPEN_GATE_LO` (none) to `SHARPEN_GATE_HI` (all): low-contrast
+/// texture and noise are not edges.
+pub const SHARPEN_GATE_LO: f32 = 0.04;
+pub const SHARPEN_GATE_HI: f32 = 0.2;
+/// Edge mode soft-clips `u` around this amplitude (log2), which caps the overshoot, i.e. the halos.
+pub const SHARPEN_TAU: f32 = 0.4;
+/// How much of the fine band Detail 100 adds to the plain unsharp mask.
+pub const SHARPEN_FINE_GAIN: f32 = 1.0;
+/// Smallest radius (px) of the sharpening blurs: a preview much smaller than the original still
+/// sharpens its own pixels.
+pub const SHARPEN_MIN_SIGMA: f32 = 0.5;
+
+/// The sharpening shape for the bands `u` (at Radius) and `f` (at half of it), Masking `mask` and
+/// Detail `detail` (both 0–1). Detail 0 sharpens edges only, with their overshoot limited; Detail 1
+/// sharpens everything, fine texture included, without a limit and with the fine band added on top,
+/// which makes pixel-level detail crisper than the unsharp mask alone; Masking keeps sharpening off
+/// deviations below about a quarter of `mask` EV. Result in `-1..=1`.
+pub fn sharpen_shape(u: f32, f: f32, mask: f32, detail: f32) -> f32 {
+    let au = u.abs();
+    let edge = u / (1.0 + au / SHARPEN_TAU) * smooth(SHARPEN_GATE_LO, SHARPEN_GATE_HI, au);
+    let all = u + SHARPEN_FINE_GAIN * f;
+    let m = if mask > 0.0 { smooth(mask * 0.25, mask * 0.25 + 0.15, au) } else { 1.0 };
+    ((edge + detail * (all - edge)) * m).clamp(-1.0, 1.0)
+}
+
+/// Detail › Detail as 0–1. A value that is not a number reads as the default (25).
+pub fn sharpen_detail(s: &DevelopSettings) -> f32 {
+    let d = s.detail.sharpen_detail;
+    if d.is_finite() { (d / 100.0).clamp(0.0, 1.0) as f32 } else { 0.25 }
+}
+
 /// Parametric region curve (encoded domain) composed with the master point curve.
 fn curve_luts(c: &ToneCurve) -> Option<[Lut1; 3]> {
     let parametric = c.highlights != 0.0 || c.lights != 0.0 || c.darks != 0.0 || c.shadows != 0.0;
@@ -176,6 +211,8 @@ pub struct FinishParams {
     pub dehaze: f32,
     pub sharpen: f32,
     pub sharpen_mask: f32,
+    /// Detail, 0–1 (see [`sharpen_shape`]).
+    pub sharpen_detail: f32,
     /// Airlight after and before exposure, exposure gain and EV (see [`crate::Prepared`]).
     pub air: f32,
     pub air_pre: f32,
@@ -245,6 +282,7 @@ impl FinishParams {
             dehaze,
             sharpen: (s.detail.sharpen_amount / 150.0) as f32,
             sharpen_mask: (s.detail.sharpen_masking / 100.0) as f32,
+            sharpen_detail: sharpen_detail(s),
             air: air_pre * gain,
             air_pre,
             gain,
@@ -379,6 +417,7 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
         dehaze,
         sharpen,
         sharpen_mask,
+        sharpen_detail,
         air,
         air_pre,
         gain,
@@ -386,8 +425,8 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
         grain,
         ..
     } = fp;
-    let (hl, sh, clar, tex, dehaze, sharpen, sharpen_mask, air, air_pre, gain, ev) =
-        (*hl, *sh, *clar, *tex, *dehaze, *sharpen, *sharpen_mask, *air, *air_pre, *gain, *ev);
+    let (hl, sh, clar, tex, dehaze, sharpen, sharpen_mask, sharpen_detail, air, air_pre, gain, ev) =
+        (*hl, *sh, *clar, *tex, *dehaze, *sharpen, *sharpen_mask, *sharpen_detail, *air, *air_pre, *gain, *ev);
     let terms: Vec<[f32; MASK_TERMS]> = p.masks.iter().map(|m| mask_terms(&m.adjust)).collect();
     let out_to_norm = fp.out_to_norm;
     let long = fp.ow.max(fp.oh);
@@ -501,17 +540,21 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
                 delta += cl * 0.85 * det * (0.35 + 0.65 * mid);
             }
             let tx = tex + l_tex;
-            let sp = l_sharp * 0.6 + sharpen;
-            if (tx != 0.0 || sp != 0.0)
+            if tx != 0.0
                 && let Some(b) = &p.texture_blur
             {
                 let det = l_pre - b.data[i];
                 let tame = 1.0 - 0.6 * smooth(0.4, 1.6, det.abs());
                 delta += tx * 1.1 * det.clamp(-1.0, 1.0) * tame;
-                if sp != 0.0 {
-                    let m = if sharpen_mask > 0.0 { smooth(sharpen_mask * 0.25, sharpen_mask * 0.25 + 0.15, det.abs()) } else { 1.0 };
-                    delta += sp * 1.3 * det.clamp(-0.8, 0.8) * m;
-                }
+            }
+            // Sharpening (Detail › Sharpening): an unsharp mask at Radius whose shape Detail sets
+            let sp = l_sharp * 0.6 + sharpen;
+            if sp != 0.0
+                && let Some(sb) = &p.sharpen_blur
+            {
+                let u = l_pre - sb.data[i];
+                let f = p.sharpen_fine.as_ref().map_or(u, |fb| l_pre - fb.data[i]);
+                delta += sp * SHARPEN_GAIN * sharpen_shape(u, f, sharpen_mask, sharpen_detail);
             }
             // local Noise: smooth (or, negative, boost) small-amplitude detail, keep edges
             if l_noise != 0.0

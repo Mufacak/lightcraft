@@ -75,6 +75,48 @@ fn box_v(@builtin(global_invocation_id) g: vec3<u32>) {
     }
 }
 
+// A true Gaussian of a small sigma (`lightcraft_raster::blur::gaussian_exact`): one thread per pixel
+// sums the 2r + 1 weighted taps (clamped edges) along its row (gauss_h) or column (gauss_v).
+// P: w, h, nc, r, then the 2r + 1 weights (f32 bits).
+@compute @workgroup_size(64, 4)
+fn gauss_h(@builtin(global_invocation_id) g: vec3<u32>) {
+    let w = pu(0u);
+    let h = pu(1u);
+    let nc = pu(2u);
+    let r = i32(pu(3u));
+    let x = g.x;
+    let y = g.y;
+    if (x >= w || y >= h) {
+        return;
+    }
+    let last = i32(w) - 1;
+    let row = y * w;
+    var acc = vec3<f32>(0.0);
+    for (var k = -r; k <= r; k++) {
+        acc += pf(u32(k + r) + 4u) * ld(row + u32(clamp(i32(x) + k, 0, last)), nc);
+    }
+    st(row + x, nc, acc);
+}
+
+@compute @workgroup_size(64, 4)
+fn gauss_v(@builtin(global_invocation_id) g: vec3<u32>) {
+    let w = pu(0u);
+    let h = pu(1u);
+    let nc = pu(2u);
+    let r = i32(pu(3u));
+    let x = g.x;
+    let y = g.y;
+    if (x >= w || y >= h) {
+        return;
+    }
+    let last = i32(h) - 1;
+    var acc = vec3<f32>(0.0);
+    for (var k = -r; k <= r; k++) {
+        acc += pf(u32(k + r) + 4u) * ld(u32(clamp(i32(y) + k, 0, last)) * w + x, nc);
+    }
+    st(y * w + x, nc, acc);
+}
+
 // Separable median of a single-channel plane (`lightcraft_pipeline::local::median_hv`): 2r+1
 // taps (r ≤ 24, clamped edges) along a row (median_h) or a column (median_v), one thread per
 // pixel. The median is a selection, so the result matches the CPU's bit for bit.
