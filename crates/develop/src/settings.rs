@@ -631,13 +631,14 @@ pub struct Detail {
 }
 
 impl Default for Detail {
-    /// Lightroom's raw defaults are sharpening 40/1.0/25/0 and colour NR 25/50/50; we use neutral
-    /// values for rendered files and apply raw defaults at import time (`DevelopSettings::for_raw`).
+    /// Neutral for rendered files (JPEG, PNG, ...: already sharpened): no sharpening (Radius 1, Detail 50,
+    /// Masking 0 for when it is turned on) and no colour NR. Raw files get capture sharpening 150 / 1.0 / 50 / 0
+    /// and colour NR 25/50/50 at import time (`DevelopSettings::for_raw`).
     fn default() -> Self {
         Self {
             sharpen_amount: 0.0,
             sharpen_radius: 1.0,
-            sharpen_detail: 25.0,
+            sharpen_detail: 50.0,
             sharpen_masking: 0.0,
             nr_luminance: 0.0,
             nr_detail: 50.0,

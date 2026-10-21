@@ -37,7 +37,7 @@ pub const SHARPEN_FINE_GAIN: f32 = 1.0;
 pub const SHARPEN_MIN_SIGMA: f32 = 0.5;
 
 /// The sharpening shape for the bands `u` (at Radius) and `f` (at half of it), Masking `mask` and
-/// Detail `detail` (both 0–1). Detail 0 sharpens edges only, with their overshoot limited; Detail 1
+/// Detail `detail` (`mask` 0–1, `detail` 0–2). Detail 0 sharpens edges only, with their overshoot limited; Detail 1
 /// sharpens everything, fine texture included, without a limit and with the fine band added on top,
 /// which makes pixel-level detail crisper than the unsharp mask alone; Masking keeps sharpening off
 /// deviations below about a quarter of `mask` EV. Result in `-1..=1`.
@@ -60,10 +60,11 @@ pub fn pixel_sharpening(s: &DevelopSettings) -> bool {
     }
 }
 
-/// Detail › Detail as 0–1. A value that is not a number reads as the default (25).
+/// Detail › Detail as 0–2 (the slider's 0–200; above 1 the fine texture is exaggerated beyond full Detail).
+/// A value that is not a number reads as the default (50).
 pub fn sharpen_detail(s: &DevelopSettings) -> f32 {
     let d = s.detail.sharpen_detail;
-    if d.is_finite() { (d / 100.0).clamp(0.0, 1.0) as f32 } else { 0.25 }
+    if d.is_finite() { (d / 100.0).clamp(0.0, 2.0) as f32 } else { 0.5 }
 }
 
 /// Parametric region curve (encoded domain) composed with the master point curve.
@@ -222,7 +223,7 @@ pub struct FinishParams {
     pub dehaze: f32,
     pub sharpen: f32,
     pub sharpen_mask: f32,
-    /// Detail, 0–1 (see [`sharpen_shape`]).
+    /// Detail, 0–2 (see [`sharpen_shape`]).
     pub sharpen_detail: f32,
     /// V3 sharpening ([`pixel_sharpening`]); V1 and V2 sharpen with the texture band.
     pub pixel_sharpening: bool,

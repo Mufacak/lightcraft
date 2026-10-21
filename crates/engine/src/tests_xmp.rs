@@ -607,7 +607,7 @@ fn dng_embedded_crs_settings_are_read_on_import() {
     assert_eq!(p.kind, lightcraft_catalog::MediaKind::Raw);
     assert_eq!((p.develop.wb.temp, p.develop.wb.tint), (4300.0, 7.0));
     assert_eq!((p.develop.light.contrast, p.develop.effects.dehaze), (30.0, 12.0));
-    assert_eq!(p.develop.detail.sharpen_amount, 40.0, "raw defaults kept for fields the XMP doesn't set");
+    assert_eq!(p.develop.detail.sharpen_amount, 150.0, "raw defaults kept for fields the XMP doesn't set");
     assert_eq!(p.rating, 2);
 
     // a sidecar next to the DNG takes precedence over the embedded XMP

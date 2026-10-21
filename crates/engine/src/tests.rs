@@ -87,7 +87,7 @@ fn reset_edits_restores_a_raws_import_defaults() {
         }
         s.catalog.apply(lightcraft_catalog::Op::AddPhoto { photo: Box::new(p) }).unwrap();
     }
-    for (id, want) in [(200, (40.0, 25.0)), (201, (0.0, 0.0))] {
+    for (id, want) in [(200, (150.0, 25.0)), (201, (0.0, 0.0))] {
         s.execute("library.select", &json!({"ids": [id], "active": id})).unwrap();
         s.execute("develop.set", &json!({"control": "detail.sharpenAmount", "value": 90})).unwrap();
         s.execute("develop.set", &json!({"control": "detail.nrColor", "value": 70})).unwrap();

@@ -25,7 +25,7 @@ impl DevelopSettings {
         let mut s = DevelopSettings::default();
         s.wb.temp = as_shot_temp;
         s.wb.tint = as_shot_tint;
-        s.detail.sharpen_amount = 40.0;
+        s.detail.sharpen_amount = 150.0;
         s.detail.nr_color = 25.0;
         s
     }

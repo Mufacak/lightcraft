@@ -68,7 +68,7 @@ fn raw_and_other_defaults_are_applied_on_import() {
     assert_eq!(nikon.kind, MediaKind::Raw);
     assert_eq!(nikon.meta.camera, "Nikon Z 9");
     assert_eq!((nikon.develop.light.exposure, nikon.develop.effects.clarity), (0.5, 20.0), "global raw default");
-    assert_eq!(nikon.develop.detail.sharpen_amount, 40.0, "raw camera defaults stay underneath the preset");
+    assert_eq!(nikon.develop.detail.sharpen_amount, 150.0, "raw camera defaults stay underneath the preset");
     assert!(!nikon.is_edited(), "the default look counts as unedited");
     assert!(!crate::import::has_import_look(nikon), "a preset look isn't what the embedded preview shows");
     let canon = photo_named(&s, "canon.dng");
