@@ -873,6 +873,17 @@ impl Session {
         self.selection.active.filter(|id| self.catalog.photo(*id).is_some())
     }
 
+    /// What a slider resets to on photo `id`: the value its import defaults hold. A raw starts with
+    /// capture sharpening and colour noise reduction (`DevelopSettings::for_raw`), so those controls
+    /// (the Detail section's) reset to them, and to the neutral value on a file that is not a raw.
+    /// Every other control resets to the slider's own default.
+    pub fn control_default(&self, id: PhotoId, spec: &lightcraft_develop::ControlSpec) -> f64 {
+        if spec.section != lightcraft_develop::Section::Detail {
+            return spec.default;
+        }
+        self.catalog.photo(id).and_then(|p| lightcraft_develop::controls::get(&p.camera_defaults(), spec.id)).unwrap_or(spec.default)
+    }
+
     pub fn develop_of(&self, id: PhotoId) -> Option<Arc<DevelopSettings>> {
         self.catalog.photo(id).map(|p| p.develop.clone())
     }

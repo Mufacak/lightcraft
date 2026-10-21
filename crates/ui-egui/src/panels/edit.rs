@@ -39,8 +39,13 @@ pub fn apply_slider_out(
 pub(crate) fn control(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings, id: &str, enabled: bool) {
     let Some(spec) = controls::find(id) else { return };
     let v = controls::get(d, id).unwrap_or(spec.default);
-    let out = slider(ui, spec, v, enabled, None);
-    apply_slider_out(app, spec, out, |app, v| app.run("develop.set", json!({"control": id, "value": v})));
+    // double-click resets to what this photo started with (a raw's capture sharpening, not zero)
+    let spec = match app.session.active() {
+        Some(photo) => ControlSpec { default: app.session.control_default(photo, spec), ..*spec },
+        None => *spec,
+    };
+    let out = slider(ui, &spec, v, enabled, None);
+    apply_slider_out(app, &spec, out, |app, v| app.run("develop.set", json!({"control": id, "value": v})));
 }
 
 /// Relative temperature scale for rendered (non-raw) files: −100..100 ↔ Kelvin via mired shift.

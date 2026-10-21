@@ -97,6 +97,49 @@ fn reset_edits_restores_a_raws_import_defaults() {
     }
 }
 
+/// A slider (double-click) and its section reset to what the photo started with: a raw's capture
+/// sharpening and colour noise reduction, and nothing on a file that is not a raw. Other sliders keep
+/// their own default.
+#[test]
+fn reset_control_and_section_go_to_the_photos_own_defaults() {
+    use lightcraft_catalog::{Photo, PhotoId, Source};
+    use lightcraft_develop::DevelopSettings;
+    let mut s = demo();
+    for (id, format, raw) in [(200u64, "NEF", true), (201, "JPG", false)] {
+        let name = format!("p{id}.{format}");
+        let mut p = Photo::new(PhotoId(id), Source::File { path: name.clone() }, &name, format, 16, 16, "");
+        if raw {
+            p.as_shot_wb = Some((5200.0, 4.0));
+            p.develop = std::sync::Arc::new(DevelopSettings::for_raw(5200.0, 4.0));
+        }
+        s.catalog.apply(lightcraft_catalog::Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    }
+    let set = |s: &mut Session, c: &str, v: f64| s.execute("develop.set", &json!({"control": c, "value": v})).unwrap();
+    for (id, sharpen, nr) in [(200, 150.0, 25.0), (201, 0.0, 0.0)] {
+        s.execute("library.select", &json!({"ids": [id], "active": id})).unwrap();
+        set(&mut s, "detail.sharpenAmount", 90.0);
+        set(&mut s, "detail.nrColor", 70.0);
+        set(&mut s, "light.exposure", 1.0);
+        s.execute("develop.resetControl", &json!({"control": "detail.sharpenAmount"})).unwrap();
+        let d = active_dev(&s);
+        assert_eq!((d.detail.sharpen_amount, d.detail.nr_color), (sharpen, 70.0), "photo {id}: Sharpening alone");
+        s.execute("develop.resetControl", &json!({"control": "detail.nrColor"})).unwrap();
+        s.execute("develop.resetControl", &json!({"control": "light.exposure"})).unwrap();
+        let d = active_dev(&s);
+        assert_eq!((d.detail.nr_color, d.light.exposure), (nr, 0.0), "photo {id}: Colour NR; Exposure keeps the slider's default");
+        set(&mut s, "detail.sharpenAmount", 90.0);
+        set(&mut s, "detail.sharpenDetail", 120.0);
+        set(&mut s, "detail.nrColor", 70.0);
+        s.execute("develop.resetSection", &json!({"section": "detail"})).unwrap();
+        let d = active_dev(&s);
+        assert_eq!(
+            (d.detail.sharpen_amount, d.detail.sharpen_radius, d.detail.sharpen_detail, d.detail.sharpen_masking, d.detail.nr_color),
+            (sharpen, 1.0, 50.0, 0.0, nr),
+            "photo {id}: the Detail section"
+        );
+    }
+}
+
 #[test]
 fn demo_library_loads() {
     let mut s = demo();

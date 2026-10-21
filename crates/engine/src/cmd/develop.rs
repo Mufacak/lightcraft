@@ -329,8 +329,14 @@ pub fn specs() -> Vec<CommandSpec> {
             has_active,
             |s, p| {
                 let sec = section_param(p, "develop.resetSection")?;
+                let id = active(s, "develop.resetSection")?;
+                // (a raw's Sharpening and Noise Reduction go back to its import defaults, not to zero)
+                let defaults: Vec<(&str, f64)> = controls::in_section(sec).map(|c| (c.id, s.control_default(id, c))).collect();
                 edit(s, "develop.resetSection", &format!("Reset {}", sec.label()), |d| {
                     d.reset_section(sec);
+                    for (c, v) in &defaults {
+                        controls::set(d, c, *v);
+                    }
                     Ok(())
                 })
             }
@@ -338,10 +344,12 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("develop.resetControl", "Reset Control", [], None, "{control}", has_active, |s, p| {
             let c = str_param(p, "control").ok_or_else(|| bad("develop.resetControl", "missing control"))?.to_string();
             let spec = controls::find(&c).ok_or_else(|| bad("develop.resetControl", "unknown control"))?;
-            let dims = crop_dims(s, active(s, "develop.resetControl")?);
+            let id = active(s, "develop.resetControl")?;
+            let dims = crop_dims(s, id);
+            let default = s.control_default(id, spec);
             edit(s, "develop.resetControl", spec.label, |d| {
                 let before = d.crop.geometry;
-                controls::set(d, &c, spec.default);
+                controls::set(d, &c, default);
                 refit_crop_angle(c == CROP_ANGLE, before, d, dims);
                 Ok(())
             })
